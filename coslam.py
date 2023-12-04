@@ -31,11 +31,13 @@ class CoSLAM():
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.dataset = get_dataset(config)
         
-        self.create_bounds()
-        self.create_pose_data()
-        self.get_pose_representation()
+        self.create_bounds()                # 建图的边界
+        self.create_pose_data()             # 创建存储 估计的位姿 和 数据集中的位姿gt 到用的字典
+        self.get_pose_representation()      # 查看当前数据集是用轴角还是四元数表示的,tum数据集是轴角
         self.keyframeDatabase = self.create_kf_database(config)
-        self.model = JointEncoding(config, self.bounding_box).to(self.device)
+        
+        # ! -------------------- 1. Scene representation: 网络构建  -------------------- 
+        self.model = JointEncoding(config, self.bounding_box).to(self.device)  # 得到encoding/decoding网络，用于获得深度和颜色信息
     
     def seed_everything(self, seed):
         random.seed(seed)
@@ -695,9 +697,10 @@ class CoSLAM():
 
         #TODO: Evaluation of reconstruction
 
-
+# 主函数
 if __name__ == '__main__':
-            
+
+    # ********************* 加载参数 *********************
     print('Start running...')
     parser = argparse.ArgumentParser(
         description='Arguments for running the NICE-SLAM/iMAP*.'
@@ -715,7 +718,7 @@ if __name__ == '__main__':
         cfg['data']['output'] = args.output
 
     print("Saving config and script...")
-    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'])
+    save_path = os.path.join(cfg["data"]["output"], cfg['data']['exp_name'])  # Example   save_path: "output/TUM/fr_desk/demo"
     if not os.path.exists(save_path):
         os.makedirs(save_path)
     shutil.copy("coslam.py", os.path.join(save_path, 'coslam.py'))
@@ -723,6 +726,9 @@ if __name__ == '__main__':
     with open(os.path.join(save_path, 'config.json'),"w", encoding='utf-8') as f:
         f.write(json.dumps(cfg, indent=4))
 
+    # ********************* 开始SLAM *********************
+    # ! -------------------- 1. Scene representation: 网络构建  -------------------- 
     slam = CoSLAM(cfg)
+    # ! -------------------- 2/3. Start Co-SLAM(tracking + Mapping) -------------------- 
 
     slam.run()

@@ -6,7 +6,7 @@ iopath==0.1.9
 kiwisolver==1.4.4
 mathutils==2.81.2
 matplotlib==3.5.3
-numpy==1.21.6
+numpy==1.23.0
 opencv-contrib-python==4.6.0.66
 packaging==23.1
 Pillow==9.5.0
@@ -25,5 +25,4 @@ trimesh==3.21.5
 typing_extensions==4.5.0
 wheel==0.38.4
 yacs==0.1.8
-git+https://github.com/facebookresearch/pytorch3d.git
 git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch

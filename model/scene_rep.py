@@ -12,8 +12,23 @@ class JointEncoding(nn.Module):
         super(JointEncoding, self).__init__()
         self.config = config
         self.bounding_box = bound_box
-        self.get_resolution()
+        self.get_resolution()   # 从config中获得每一个体素的深度和颜色分辨率
+        
+        # ********************* 1.1 编码 *********************
+        """
+        首先,从config中获得的联合编码方案: 1. parametric encoding用HashGrid 2. coordinate encoding用OneBlob
+        然后,通过tiny-cuda-nn实现任意方案的编码网络. 参考https://github.com/NVlabs/tiny-cuda-nn/blob/master/src/encoding.cu
+        """
         self.get_encoding(config)
+
+        # ********************* 1.2 解码 *********************
+        """
+        首先,从config中获得解码网络的各个参数
+        然后,为颜色color和深度sdf各创建一个2层的MLP网络,激活函数都是ReLU
+        sdf:   最后输出维度为16, 即预测的SDF值(1维) + 特征向量h值(15维)
+        color: 最后输出维度为3, 即预测的RGB值
+        对应论文里的公式(2)(3)
+        """
         self.get_decoder(config)
         
 
