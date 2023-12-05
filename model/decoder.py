@@ -124,7 +124,8 @@ class ColorSDFNet(nn.Module):
                 geo_feat_dim=config['decoder']['geo_feat_dim'],
                 hidden_dim=config['decoder']['hidden_dim'], 
                 num_layers=config['decoder']['num_layers'])
-            
+
+    # 允许颜色网络直接访问原始的颜色嵌入信息(ColorSDFNet的特点)        
     def forward(self, embed, embed_pos, embed_color):
 
         if embed_pos is not None:
@@ -158,6 +159,7 @@ class ColorSDFNet_v2(nn.Module):
                 hidden_dim=config['decoder']['hidden_dim'], 
                 num_layers=config['decoder']['num_layers'])
             
+    # 颜色信息是通过结合空间编码和几何特征来生成的，而不是直接从独立的颜色数据中提取(ColorSDFNet_v2的特点)
     def forward(self, embed, embed_pos):
 
         if embed_pos is not None:

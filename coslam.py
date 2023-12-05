@@ -36,7 +36,8 @@ class CoSLAM():
         self.get_pose_representation()      # 查看当前数据集是用轴角还是四元数表示的,tum数据集是轴角
         self.keyframeDatabase = self.create_kf_database(config)
         
-        # ! -------------------- 1. Scene representation: 网络构建  -------------------- 
+        #  -------------------- 1. Scene representation: 网络构建  -------------------- 
+        # JointEncoding函数内部完成Encoding和Decoding
         self.model = JointEncoding(config, self.bounding_box).to(self.device)  # 得到encoding/decoding网络，用于获得深度和颜色信息
     
     def seed_everything(self, seed):
@@ -632,12 +633,18 @@ class CoSLAM():
                         mesh_savepath=mesh_savepath)      
         
     def run(self):
+        # ********************* 创建map和BA的优化器 *********************
+        # Adam优化器，用于优化encoder/decoder网络
+        # 优化位姿的优化器见tracking_render()
         self.create_optimizer()
+
+        # ********************* 加载数据 *********************
         data_loader = DataLoader(self.dataset, num_workers=self.config['data']['num_workers'])
 
-        # Start Co-SLAM!
+        #  ---------------Sec 2 and Sec 3. Start Co-SLAM(tracking + Mapping) -----------------
         for i, batch in tqdm(enumerate(data_loader)):
             # Visualisation
+            # 可视化rgb和深度图
             if self.config['mesh']['visualisation']:
                 rgb = cv2.cvtColor(batch["rgb"].squeeze().cpu().numpy(), cv2.COLOR_BGR2RGB)
                 raw_depth = batch["depth"]
@@ -650,16 +657,26 @@ class CoSLAM():
                 cv2.imshow('RGB-D'.format(i), image)
                 key = cv2.waitKey(1)
 
+            # ********************* 建立初始的 地图和位姿估计 *********************
             # First frame mapping
             if i == 0:
                 self.first_frame_mapping(batch, self.config['mapping']['first_iters'])
             
+
+
+            # ********************* 建立每一帧的地图和位姿估计 *********************
             # Tracking + Mapping
             else:
+
+                #  --------------------Sec 2. Tracking -------------------- 
                 if self.config['tracking']['iter_point'] > 0:
+                    # 本论文没用该方法(通过点云损失来跟踪当前帧的相机位姿)
                     self.tracking_pc(batch, i)
+                # 使用当前帧的rgb损失，深度损失，sdf损失，fs损失来跟踪当前帧的相机位姿
                 self.tracking_render(batch, i)
     
+
+                #  --------------------Sec 3. Mapping -------------------- 
                 if i%self.config['mapping']['map_every']==0:
                     self.current_frame_mapping(batch, i)
                     self.global_BA(batch, i)
@@ -670,7 +687,7 @@ class CoSLAM():
                     self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
                     print('add keyframe:',i)
             
-
+                #  -------------------- Evaluation -------------------- 
                 if i % self.config['mesh']['vis']==0:
                     self.save_mesh(i, voxel_size=self.config['mesh']['voxel_eval'])
                     pose_relative = self.convert_relative_pose()
@@ -727,8 +744,7 @@ if __name__ == '__main__':
         f.write(json.dumps(cfg, indent=4))
 
     # ********************* 开始SLAM *********************
-    # ! -------------------- 1. Scene representation: 网络构建  -------------------- 
+    #  -------------------- Sec 1. Scene representation: 网络构建  -------------------- 
     slam = CoSLAM(cfg)
-    # ! -------------------- 2/3. Start Co-SLAM(tracking + Mapping) -------------------- 
-
+    #  -------------------- Sec 2 and Sec 3. Start Co-SLAM(tracking + Mapping) -------------------- 
     slam.run()

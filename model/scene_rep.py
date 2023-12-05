@@ -27,7 +27,6 @@ class JointEncoding(nn.Module):
         然后,为颜色color和深度sdf各创建一个2层的MLP网络,激活函数都是ReLU
         sdf:   最后输出维度为16, 即预测的SDF值(1维) + 特征向量h值(15维)
         color: 最后输出维度为3, 即预测的RGB值
-        对应论文里的公式(2)(3)
         """
         self.get_decoder(config)
         
@@ -49,9 +48,15 @@ class JointEncoding(nn.Module):
         
         print('SDF resolution:', self.resolution_sdf)
 
+    # 对应 1.1 编码
     def get_encoding(self, config):
         '''
         Get the encoding of the scene representation
+
+        以tum.yaml为例
+        pos enc: 'OneBlob'
+        grid enc: 'HashGrid'
+        grid oneGrid: 'True'
         '''
         # Coordinate encoding
         self.embedpos_fn, self.input_ch_pos = get_encoder(config['pos']['enc'], n_bins=self.config['pos']['n_bins'])
@@ -64,10 +69,17 @@ class JointEncoding(nn.Module):
             print('Color resolution:', self.resolution_color)
             self.embed_fn_color, self.input_ch_color = get_encoder(config['grid']['enc'], log2_hashmap_size=config['grid']['hash_size'], desired_resolution=self.resolution_color)
 
+    # 对应 1.2 解码
     def get_decoder(self, config):
         '''
         Get the decoder of the scene representation
+
+        以tum.yaml为例
+        grid oneGrid: True
         '''
+
+        # 处理嵌入的空间位置和几何特征，以生成颜色和SDF值
+        # ********************* 根据论文公式(2)(3)，处理嵌入的空间位置和几何特征，以生成颜色和SDF值*********************
         if not self.config['grid']['oneGrid']:
             self.decoder = ColorSDFNet(config, input_ch=self.input_ch, input_ch_pos=self.input_ch_pos)
         else:
@@ -76,6 +88,7 @@ class JointEncoding(nn.Module):
         self.color_net = batchify(self.decoder.color_net, None)
         self.sdf_net = batchify(self.decoder.sdf_net, None)
 
+    # 对应论文，将sdf值转成weights权重
     def sdf2weights(self, sdf, z_vals, args=None):
         '''
         Convert signed distance function to weights.
@@ -86,6 +99,7 @@ class JointEncoding(nn.Module):
         Returns:
             weights: [N_rays, N_samples]
         '''
+        # ********************* 根据论文公式(5)用两个sigmoid计算权重 *********************
         weights = torch.sigmoid(sdf / args['training']['trunc']) * torch.sigmoid(-sdf / args['training']['trunc'])
 
         signs = sdf[:, 1:] * sdf[:, :-1]
@@ -98,6 +112,7 @@ class JointEncoding(nn.Module):
         weights = weights * mask
         return weights / (torch.sum(weights, axis=-1, keepdims=True) + 1e-8)
     
+    # 内部函数
     def raw2outputs(self, raw, z_vals, white_bkgd=False):
         '''
         Perform volume rendering using weights computed from sdf.
@@ -113,9 +128,11 @@ class JointEncoding(nn.Module):
         '''
         rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
         weights = self.sdf2weights(raw[..., 3], z_vals, args=self.config)
+        
+        # ********************* 根据论文公式(4)计算rendering颜色和深度 *********************
         rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-
         depth_map = torch.sum(weights * z_vals, -1)
+
         depth_var = torch.sum(weights * torch.square(z_vals - depth_map.unsqueeze(-1)), dim=-1)
         disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
         acc_map = torch.sum(weights, -1)
@@ -125,6 +142,7 @@ class JointEncoding(nn.Module):
 
         return rgb_map, disp_map, acc_map, weights, depth_map, depth_var
     
+    # 外部查询函数，在coslam.py中调用
     def query_sdf(self, query_points, return_geo=False, embed=False):
         '''
         Get the SDF value of the query points
@@ -151,9 +169,11 @@ class JointEncoding(nn.Module):
 
         return sdf, geo_feat
     
+    # 外部查询函数，在coslam.py中调用
     def query_color(self, query_points):
         return torch.sigmoid(self.query_color_sdf(query_points)[..., :3])
       
+    # 外部查询函数，在coslam.py中调用
     def query_color_sdf(self, query_points):
         '''
         Query the color and sdf at query_points.
@@ -172,6 +192,7 @@ class JointEncoding(nn.Module):
             return self.decoder(embed, embe_pos, embed_color)
         return self.decoder(embed, embe_pos)
     
+    # 内部函数
     def run_network(self, inputs):
         """
         Run the network on a batch of inputs.
@@ -192,6 +213,7 @@ class JointEncoding(nn.Module):
 
         return outputs
     
+    # 外部函数，在coslam.py中调用
     def render_surface_color(self, rays_o, normal):
         '''
         Render the surface color of the points.
@@ -210,44 +232,61 @@ class JointEncoding(nn.Module):
         rgb, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
         return rgb
     
+    # 内部函数，神经渲染流程的实现，用于处理光线并返回渲染结果，在forward()函数中被调用
     def render_rays(self, rays_o, rays_d, target_d=None):
         '''
         Params:
             rays_o: [N_rays, 3]
             rays_d: [N_rays, 3]
             target_d: [N_rays, 1]
-
         '''
-        n_rays = rays_o.shape[0]
 
-        # Sample depth
+        # 首先拿到射线的数量
+        n_rays = rays_o.shape[0]
+        
+        
+        '''
+        以tum.yaml为例
+            training range_d: 0.25
+            training n_range_d: 21
+        '''
+
+        # -------------------- 2.1 && 3.2 Ray samping -------------------- 
+        # A. 射线深度采样，确保深度为正值
         if target_d is not None:
+            # 如果有目标深度 target_d，在目标深度附近取样
+            # 在深度[-range_d,range_d]范围内生成n_range_d个等间隔张量
             z_samples = torch.linspace(-self.config['training']['range_d'], self.config['training']['range_d'], steps=self.config['training']['n_range_d']).to(target_d) 
             z_samples = z_samples[None, :].repeat(n_rays, 1) + target_d
+            # 将目标深度为负的那些取样点改为在深度near到far的范围内生成n_range_d个等间隔张量
             z_samples[target_d.squeeze()<=0] = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], steps=self.config['training']['n_range_d']).to(target_d) 
 
             if self.config['training']['n_samples_d'] > 0:
+                # 符合此判断，则再在深度near到far的范围内生成n_samples_d个取样点
                 z_vals = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], self.config['training']['n_samples_d'])[None, :].repeat(n_rays, 1).to(rays_o)
+                # 深度值排序
                 z_vals, _ = torch.sort(torch.cat([z_vals, z_samples], -1), -1)
             else:
                 z_vals = z_samples
         else:
             z_vals = torch.linspace(self.config['cam']['near'], self.config['cam']['far'], self.config['training']['n_samples']).to(rays_o)
             z_vals = z_vals[None, :].repeat(n_rays, 1) # [n_rays, n_samples]
+        # B. 如果没有目标深度，或者设置了额外的采样深度 (n_samples_d)，则在相机的视野范围内进行均匀取样
 
-        # Perturb sampling depths
+        # C. 是否要进行深度扰动
         if self.config['training']['perturb'] > 0.:
             mids = .5 * (z_vals[...,1:] + z_vals[...,:-1])
             upper = torch.cat([mids, z_vals[...,-1:]], -1)
             lower = torch.cat([z_vals[...,:1], mids], -1)
             z_vals = lower + (upper - lower) * torch.rand(z_vals.shape).to(rays_o)
 
-        # Run rendering pipeline
+        # D. 执行神经网络渲染
         pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
         raw = self.run_network(pts)
+        # E. 将原始数据转换为具体的渲染结果，如RGB图像、深度图、不透明度累积和深度方差
         rgb_map, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
 
-        # Importance sampling
+        # Importance sampling，yaml里默认是0，不执行
         if self.config['training']['n_importance'] > 0:
 
             rgb_map_0, disp_map_0, acc_map_0, depth_map_0, depth_var_0 = rgb_map, disp_map, acc_map, depth_map, depth_var
@@ -262,7 +301,7 @@ class JointEncoding(nn.Module):
             raw = self.run_network(pts)
             rgb_map, disp_map, acc_map, weights, depth_map, depth_var = self.raw2outputs(raw, z_vals, self.config['training']['white_bkgd'])
 
-        # Return rendering outputs
+        # F. Return rendering outputs, 返回一个字典，包含RGB图像、深度图、不透明度累积和深度方差等的结果
         ret = {'rgb' : rgb_map, 'depth' :depth_map, 
                'disp_map' : disp_map, 'acc_map' : acc_map, 
                'depth_var':depth_var,}
@@ -270,6 +309,7 @@ class JointEncoding(nn.Module):
 
         ret['raw'] = raw
 
+        # Importance sampling，yaml里默认是0，不执行
         if self.config['training']['n_importance'] > 0:
             ret['rgb0'] = rgb_map_0
             ret['disp0'] = disp_map_0
@@ -294,18 +334,19 @@ class JointEncoding(nn.Module):
              r r r tz
         '''
 
-        # Get render results
+        # 渲染函数，得到渲染的结果，传入参数是采样光线的起点和方向，以及深度值，传出的结果是一个字典，包含RGB图像、深度图、不透明度累积和深度方差等的结果
         rend_dict = self.render_rays(rays_o, rays_d, target_d=target_d)
 
+        # 非训练流程里，则直接返回
         if not self.training:
             return rend_dict
         
-        # Get depth and rgb weights for loss
         valid_depth_mask = (target_d.squeeze() > 0.) * (target_d.squeeze() < self.config['cam']['depth_trunc'])
         rgb_weight = valid_depth_mask.clone().unsqueeze(-1)
         rgb_weight[rgb_weight==0] = self.config['training']['rgb_missing']
 
-        # Get render loss
+        # ********************* 根据论文公式(6)计算颜色和深度的损失函数 *********************
+        # 从rend_dict字典里取值
         rgb_loss = compute_loss(rend_dict["rgb"]*rgb_weight, target_rgb*rgb_weight)
         psnr = mse2psnr(rgb_loss)
         depth_loss = compute_loss(rend_dict["depth"].squeeze()[valid_depth_mask], target_d.squeeze()[valid_depth_mask])
@@ -314,7 +355,7 @@ class JointEncoding(nn.Module):
             rgb_loss += compute_loss(rend_dict["rgb0"]*rgb_weight, target_rgb*rgb_weight)
             depth_loss += compute_loss(rend_dict["depth0"][valid_depth_mask], target_d.squeeze()[valid_depth_mask])
         
-        # Get sdf loss
+        # ********************* 根据论文公式(7)和(8)计算sdf和free-space损失 *********************
         z_vals = rend_dict['z_vals']  # [N_rand, N_samples + N_importance]
         sdf = rend_dict['raw'][..., -1]  # [N_rand, N_samples + N_importance]
         truncation = self.config['training']['trunc'] * self.config['data']['sc_factor']
@@ -331,4 +372,5 @@ class JointEncoding(nn.Module):
             "psnr": psnr,
         }
 
+        # 返回一个字典，内含多个计算的loss结果
         return ret
