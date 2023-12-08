@@ -168,15 +168,22 @@ class CoSLAM():
             loss: float
         
         '''
+        # 打印开始信息和初始赋值
         print('First frame mapping...')
         c2w = batch['c2w'][0].to(self.device)
         self.est_c2w_data[0] = c2w
         self.est_c2w_data_rel[0] = c2w
 
+        # 将模型设置为训练模式
         self.model.train()
 
         # Training
         for i in range(n_iters):
+            # 此处的循环与 tracking_render 代码中的2.2部分for循环代码、和 BA 的for循环代码是比较相似的
+            # 1问.哪里相似？
+            # 1答：射线的选择和构建很相似，self.select_samples像素随机选择，根据原点rays_o和方向rays_d构建射线
+            # 2问：为什么相似？
+            # 2答：因为都要使用Ray Sampling，我们这里扩展 2.1 3.2 Ray Sampling的范畴，纯粹的光线采样是定义在forward里的render_rays里的，但这里前置的步骤————像素的选择，射线构建，目标颜色值和深度值的获取，都是必不可少的
             self.map_optimizer.zero_grad()
             indice = self.select_samples(self.dataset.H, self.dataset.W, self.config['mapping']['sample'])
             
@@ -188,13 +195,14 @@ class CoSLAM():
             rays_o = c2w[None, :3, -1].repeat(self.config['mapping']['sample'], 1)
             rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
 
-            # Forward
+            # Sec 3.2 Ray Sampling 藏在self.model.forward里
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
             loss = self.get_loss_from_ret(ret)
             loss.backward()
             self.map_optimizer.step()
         
         # First frame will always be a keyframe
+        # 第一帧很重要，肯定是关键帧，在NICE_SLAM里提到，第一帧来建立一个参考点，用于建立后续帧的相对位置和方向
         self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
         if self.config['mapping']['first_mesh']:
             self.save_mesh(0)
@@ -202,6 +210,7 @@ class CoSLAM():
         print('First frame mapping done')
         return ret, loss
 
+    # 根据if判断，函数很早就会return，没有真正执行
     def current_frame_mapping(self, batch, cur_frame_id):
         '''
         Current frame mapping
@@ -215,6 +224,7 @@ class CoSLAM():
             loss: float
         
         '''
+        # yaml里, ['mapping']['cur_frame_iters'] = 0，return，不再执行
         if self.config['mapping']['cur_frame_iters'] <= 0:
             return
         print('Current frame mapping...')
@@ -236,7 +246,7 @@ class CoSLAM():
             rays_o = c2w[None, :3, -1].repeat(self.config['mapping']['sample'], 1)
             rays_d = torch.sum(rays_d_cam[..., None, :] * c2w[:3, :3], -1)
 
-            # Forward
+            # Sec 3.2 Ray Sampling 藏在self.model.forward里
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
             loss = self.get_loss_from_ret(ret)
             loss.backward()
@@ -292,6 +302,7 @@ class CoSLAM():
         '''
         pose_optimizer = None
 
+        # 提取所有关键帧（KF）的姿态和对应的帧ID
         # all the KF poses: 0, 5, 10, ...
         poses = torch.stack([self.est_c2w_data[i] for i in range(0, cur_frame_id, self.config['mapping']['keyframe_every'])])
         
@@ -299,14 +310,19 @@ class CoSLAM():
         frame_ids_all = torch.tensor(list(range(0, cur_frame_id, self.config['mapping']['keyframe_every'])))
 
         if len(self.keyframeDatabase.frame_ids) < 2:
+            # 如果关键帧数据库中的帧数少于2，直接使用这些帧的姿态
             poses_fixed = torch.nn.parameter.Parameter(poses).to(self.device)
             current_pose = self.est_c2w_data[cur_frame_id][None,...]
             poses_all = torch.cat([poses_fixed, current_pose], dim=0)
         
         else:
+            # 如果有两个或更多关键帧，将第一个关键帧的姿态固定，并对其他关键帧姿态进行优化
             poses_fixed = torch.nn.parameter.Parameter(poses[:1]).to(self.device)
             current_pose = self.est_c2w_data[cur_frame_id][None,...]
 
+            # optim_cur符号位判断，代表是否优化当前帧
+            # 如果优化当前帧，在get_pose_param_optim()的传参里加入当前帧，poses_all里不重复加入了
+            # 如果不优化当前帧，get_pose_param_optim()的传参无当前帧，poses_all里加入当前帧
             if self.config['mapping']['optim_cur']:
                 cur_rot, cur_trans, pose_optimizer, = self.get_pose_param_optim(torch.cat([poses[1:], current_pose]))
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans).to(self.device)
@@ -326,22 +342,25 @@ class CoSLAM():
         current_rays = current_rays.reshape(-1, current_rays.shape[-1])
 
         
-
+        # tum.yaml里，['mapping']['iters'] = 20 , ['mapping']['sample'] = 2048
         for i in range(self.config['mapping']['iters']):
 
             # Sample rays with real frame ids
             # rays [bs, 7]
             # frame_ids [bs]
+
+            # 全局采样，暗藏玄机，内部对应论文的Contribution II
             rays, ids = self.keyframeDatabase.sample_global_rays(self.config['mapping']['sample'])
 
-            #TODO: Checkpoint...
+            # 从当前帧中随机采样一定数量的光线。采样数量取决于配置的最小像素数和关键帧的数量
             idx_cur = random.sample(range(0, self.dataset.H * self.dataset.W),max(self.config['mapping']['sample'] // len(self.keyframeDatabase.frame_ids), self.config['mapping']['min_pixels_cur']))
             current_rays_batch = current_rays[idx_cur, :]
 
+            # 将关键帧的光线(rays)和当前帧的光线(current_rays_batch)合并
             rays = torch.cat([rays, current_rays_batch], dim=0) # N, 7
             ids_all = torch.cat([ids//self.config['mapping']['keyframe_every'], -torch.ones((len(idx_cur)))]).to(torch.int64)
 
-
+            # 将光线的方向、目标RGB值和目标深度值提取出来，用新变量赋值
             rays_d_cam = rays[..., :3].to(self.device)
             target_s = rays[..., 3:6].to(self.device)
             target_d = rays[..., 6:7].to(self.device)
@@ -351,13 +370,14 @@ class CoSLAM():
             rays_o = poses_all[ids_all, None, :3, -1].repeat(1, rays_d.shape[1], 1).reshape(-1, 3)
             rays_d = rays_d.reshape(-1, 3)
 
-
+            # 熟悉的self.model.forward，想必大家看到这里已经不必多说，看到这就知道渲染和计算loss的一整套流程
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
 
             loss = self.get_loss_from_ret(ret, smooth=True)
             
             loss.backward(retain_graph=True)
             
+            # *.yaml里，["mapping"]["map_accum_step"] = 1，不执行
             if (i + 1) % cfg["mapping"]["map_accum_step"] == 0:
                
                 if (i + 1) > cfg["mapping"]["map_wait_step"]:
@@ -366,12 +386,20 @@ class CoSLAM():
                     print('Wait update')
                 self.map_optimizer.zero_grad()
 
+            # tum.yaml里，["mapping"]["pose_accum_step"] = 5
+
+            # 姿态优化器的更新
+            # 提问：for循环内部和外部，分别有一个pose_optimizer的操作，他们有何区别？
+            # 答part1：先看下方的循环内部的姿态优化器的更新，姿态优化器在每个 pose_accum_step(5步)之后进行一次更新。这意味着每经过指定的迭代次数，就会更新一次姿态参数。
             if pose_optimizer is not None and (i + 1) % cfg["mapping"]["pose_accum_step"] == 0:
                 pose_optimizer.step()
                 # get SE3 poses to do forward pass
+                # 计算新的姿态矩阵，并将其转移到计算设备上
                 pose_optim = self.matrix_from_tensor(cur_rot, cur_trans)
                 pose_optim = pose_optim.to(self.device)
+
                 # So current pose is always unchanged
+                # 这是作者给出的注释，理解了这段话你就理解了这个姿态优化过程，此理解过程交给同学们
                 if self.config['mapping']['optim_cur']:
                     poses_all = torch.cat([poses_fixed, pose_optim], dim=0)
                 
@@ -385,25 +413,38 @@ class CoSLAM():
                 # zero_grad here
                 pose_optimizer.zero_grad()
         
+        # 答part2：在循环结束后，如果存在姿态优化器且有多于一个帧的姿态数据时，进行更新
         if pose_optimizer is not None and len(frame_ids_all) > 1:
+            # 更新所有关键帧的姿态，这是在整个优化过程结束后对关键帧姿态进行最终调整
             for i in range(len(frame_ids_all[1:])):
                 self.est_c2w_data[int(frame_ids_all[i+1].item())] = self.matrix_from_tensor(cur_rot[i:i+1], cur_trans[i:i+1]).detach().clone()[0]
         
+            # 如果配置了优化当前帧，将最终的姿态估计应用于当前帧
             if self.config['mapping']['optim_cur']:
                 print('Update current pose')
                 self.est_c2w_data[cur_frame_id] = self.matrix_from_tensor(cur_rot[-1:], cur_trans[-1:]).detach().clone()[0]
- 
+        # 对循环内外中的pose_optimizer的总结：
+        # 循环内部的更新是一个逐步的优化过程，用于持续调整姿态估计。
+        #   这些更新有助于在整个映射过程中不断改进姿态估计 
+        # 循环外的更新是在整个映射过程结束后进行的最终调整
+        #   它确保了所有关键帧和当前帧的姿态估计都是最新和最准确的
+
+
+    # ********************* 根据论文公式(10)估算当前帧的初始化位姿 *********************   
     def predict_current_pose(self, frame_id, constant_speed=True):
         '''
         Predict current pose from previous pose using camera motion model
         '''
+        # 特殊处理：第一帧或者非恒速，直接使用上一帧的相机姿态作为当前帧的预测姿态
         if frame_id == 1 or (not constant_speed):
             c2w_est_prev = self.est_c2w_data[frame_id-1].to(self.device)
             self.est_c2w_data[frame_id] = c2w_est_prev
             
+        # 恒速运动模型，使用前两帧的相机姿态来预测当前帧的姿态    
         else:
             c2w_est_prev_prev = self.est_c2w_data[frame_id-2].to(self.device)
             c2w_est_prev = self.est_c2w_data[frame_id-1].to(self.device)
+            # 估算前前帧和前帧的delta，将delta运用到前帧上得到当前帧
             delta = c2w_est_prev@c2w_est_prev_prev.float().inverse()
             self.est_c2w_data[frame_id] = delta@c2w_est_prev
         
@@ -507,12 +548,14 @@ class CoSLAM():
             frame_id: Current frame id (int)
         '''
 
-        c2w_gt = batch['c2w'][0].to(self.device)
+        c2w_gt = batch['c2w'][0].to(self.device) # 从数据集得到当前帧的位姿真值 [4, 4]
 
+        # 初始化当前帧的位姿估计
         # Initialize current pose
-        if self.config['tracking']['iter_point'] > 0:
+        if self.config['tracking']['iter_point'] > 0: # 本论文没用该方法, tum.yaml里['tracking']['iter_point']=0
             cur_c2w = self.est_c2w_data[frame_id]
         else:
+            # 本论文采用此方法
             cur_c2w = self.predict_current_pose(frame_id, self.config['tracking']['const_speed'])
 
         indice = None
@@ -522,9 +565,11 @@ class CoSLAM():
         iW = self.config['tracking']['ignore_edge_W']
         iH = self.config['tracking']['ignore_edge_H']
 
+        # 优化准备，创建用于优化的旋转 (cur_rot) 和平移 (cur_trans) 参数，以及相应的优化器 (pose_optimizer)
         cur_rot, cur_trans, pose_optimizer = self.get_pose_param_optim(cur_c2w[None,...], mapping=False)
 
-        # Start tracking
+        # -------------------- Sec 2.2 Camera Tracking --------------------
+        # Camera Tracking 是一个多次循环迭代的过程，优化相机姿态以减少渲染结果和实际图像之间的差异
         for i in range(self.config['tracking']['iter']):
             pose_optimizer.zero_grad()
             c2w_est = self.matrix_from_tensor(cur_rot, cur_trans)
@@ -542,7 +587,9 @@ class CoSLAM():
             rays_o = c2w_est[...,:3, -1].repeat(self.config['tracking']['sample'], 1)
             rays_d = torch.sum(rays_d_cam[..., None, :] * c2w_est[:, :3, :3], -1)
 
+            # -------------------- Sec 2.1 Ray Sampling 环节在self.model.forward()函数内部的render_rays()函数中执行  --------------------
             ret = self.model.forward(rays_o, rays_d, target_s, target_d)
+            # 注意这个函数get_loss_from_ret()，内部将rgb损失，深度损失，sdf损失，fs损失都使用上了
             loss = self.get_loss_from_ret(ret)
             
             if best_sdf_loss is None:
@@ -552,6 +599,7 @@ class CoSLAM():
             with torch.no_grad():
                 c2w_est = self.matrix_from_tensor(cur_rot, cur_trans)
 
+                # 如果新的姿态估计比之前的更好，更新最佳估计best_c2w_est
                 if loss.cpu().item() < best_sdf_loss:
                     best_sdf_loss = loss.cpu().item()
                     best_c2w_est = c2w_est.detach()
@@ -564,21 +612,24 @@ class CoSLAM():
 
             loss.backward()
             pose_optimizer.step()
-        
+        '''
+        tum.yaml
+        tracking best: False      没有选最小的，个人猜测可能是出于实时性的考虑
+        '''
         if self.config['tracking']['best']:
-            # Use the pose with smallest loss
+            # Use the pose with smallest loss 选最小loss的pose
             self.est_c2w_data[frame_id] = best_c2w_est.detach().clone()[0]
         else:
-            # Use the pose after the last iteration
+            # Use the pose after the last iteration 选最后一次迭代得到的pose
             self.est_c2w_data[frame_id] = c2w_est.detach().clone()[0]
 
-       # Save relative pose of non-keyframes
-        if frame_id % self.config['mapping']['keyframe_every'] != 0:
-            kf_id = frame_id // self.config['mapping']['keyframe_every']
-            kf_frame_id = kf_id * self.config['mapping']['keyframe_every']
-            c2w_key = self.est_c2w_data[kf_frame_id]
-            delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse()
-            self.est_c2w_data_rel[frame_id] = delta
+        # 对于非关键帧，保存相对于关键帧的姿态变换
+        if frame_id % self.config['mapping']['keyframe_every'] != 0:        # 如果不是关键帧
+            kf_id = frame_id // self.config['mapping']['keyframe_every']    # 前帧所属的关键帧的索引，比如11//5=2 第11帧属于第2个的关键帧
+            kf_frame_id = kf_id * self.config['mapping']['keyframe_every']  # 关键帧id，比如2*5，第2个关键帧就是第10帧
+            c2w_key = self.est_c2w_data[kf_frame_id]                        # 关键帧的估计位姿
+            delta = self.est_c2w_data[frame_id] @ c2w_key.float().inverse() # 当前帧的T 乘上 关键帧的T^-1 得到两帧位姿之间的差异
+            self.est_c2w_data_rel[frame_id] = delta                         # 保存差异
         
         print('Best loss: {}, Last loss{}'.format(F.l1_loss(best_c2w_est.to(self.device)[0,:3], c2w_gt[:3]).cpu().item(), F.l1_loss(c2w_est[0,:3], c2w_gt[:3]).cpu().item()))
     
@@ -658,7 +709,7 @@ class CoSLAM():
                 key = cv2.waitKey(1)
 
             # ********************* 建立初始的 地图和位姿估计 *********************
-            # First frame mapping
+            # -------------------- Sec 3.0 我们新增一个3.0，作为First frame mapping模块的代号，方便理解执行顺序 --------------------
             if i == 0:
                 self.first_frame_mapping(batch, self.config['mapping']['first_iters'])
             
@@ -677,13 +728,15 @@ class CoSLAM():
     
 
                 #  --------------------Sec 3. Mapping -------------------- 
-                if i%self.config['mapping']['map_every']==0:
+                if i%self.config['mapping']['map_every']==0:  # 每5帧建一次图  ['mapping']['map_every']=5
                     self.current_frame_mapping(batch, i)
+                    # --------------------Sec 3.3 BA -------------------- 
                     self.global_BA(batch, i)
 
-                    
+                    # --------------------Sec 2.3 Tracked frame ----> Sec 3.1 Keyframe database --------------------
+                    # 从Sec 2.3到3.1，这是一个动态过程，从tracking部分传递过来的batch，在符合keyframe_every的判断之后就可以传入，进行Pixel sampling并记录
                 # Add keyframe
-                if i % self.config['mapping']['keyframe_every'] == 0:
+                if i % self.config['mapping']['keyframe_every'] == 0: # 每5帧增加一个关键帧  ['mapping']['keyframe_every']=5
                     self.keyframeDatabase.add_keyframe(batch, filter_depth=self.config['mapping']['filter_depth'])
                     print('add keyframe:',i)
             

@@ -251,7 +251,7 @@ class JointEncoding(nn.Module):
             training n_range_d: 21
         '''
 
-        # -------------------- 2.1 && 3.2 Ray samping -------------------- 
+        # -------------------- Sec 2.1 && 3.2 Ray samping -------------------- 
         # A. 射线深度采样，确保深度为正值
         if target_d is not None:
             # 如果有目标深度 target_d，在目标深度附近取样
