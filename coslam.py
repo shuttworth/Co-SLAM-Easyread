@@ -377,9 +377,8 @@ class CoSLAM():
             
             loss.backward(retain_graph=True)
             
-            # *.yaml里，["mapping"]["map_accum_step"] = 1，不执行
+            # *.yaml里，["mapping"]["map_accum_step"] = 1，(i+1)对1取余始终是0，执行
             if (i + 1) % cfg["mapping"]["map_accum_step"] == 0:
-               
                 if (i + 1) > cfg["mapping"]["map_wait_step"]:
                     self.map_optimizer.step()
                 else:
