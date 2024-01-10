@@ -30,6 +30,10 @@ It is the supporting code annotation warehouse of the "NeRF-based SLAM course".
     <li>
       <a href="./model/keyframe.py">keyframe.py: add keyframe</a>
     </li>
+    <li>
+      <a href="https://github.com/Immortalqx/Co-SLAM-Visualizer">Additional Visulizer: visualize like the Co-SLAM presentation video</a>
+    </li>
+
   </ol>
 </details>
 
@@ -38,7 +42,7 @@ It is the supporting code annotation warehouse of the "NeRF-based SLAM course".
 More supporting videos come from here:
 
 <p align="left">
-  <img src="media/advertisement.JPG" width="260" alt="Advertisement">
+  <img src="media/advertisement.jpg" width="260" alt="Advertisement">
 </p>
 
 Others are the same with Co-SLAM, please refer to [https://github.com/HengyiWang/Co-SLAM](https://github.com/HengyiWang/Co-SLAM) for the Installation\Run\So on.
